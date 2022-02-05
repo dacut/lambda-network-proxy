@@ -7,4 +7,5 @@ type ProxyEndpointEvent struct {
 	ProxyProtocol  string `json:"ProxyProtocol"`
 	ProxyAddress   string `json:"ProxyAddress"`
 	ProxyPort      uint   `json:"ProxyPort"`
+	Nonce          string `json:"Nonce"`
 }
