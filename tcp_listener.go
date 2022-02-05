@@ -12,7 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdaTypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
-	"github.com/dacut/lambda-nlb/event"
+	event "github.com/dacut/lambda-network-proxy-event-go"
 )
 
 type TCPListener struct {
@@ -116,7 +116,7 @@ func (tl *TCPListener) HandleConnection(ctx context.Context, wg *sync.WaitGroup,
 	}
 	_, err = lambdaClient.Invoke(ctx, &ii)
 	if err != nil {
-		log.Printf("Unable to invoke Lambda: %v", err)
+		log.Printf("Lambda invocation on %s failed: %v", tl.ListenerConfig.FunctionName, err)
 		conn.Close()
 		l.Close()
 		return

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -28,4 +29,10 @@ func AddrToHostAndPort(addr string) (string, uint, error) {
 	}
 
 	return host, uint(port), nil
+}
+
+func CopyUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	ip := make(net.IP, len(addr.IP))
+	copy(ip, addr.IP)
+	return &net.UDPAddr{IP: ip, Port: addr.Port, Zone: addr.Zone}
 }
