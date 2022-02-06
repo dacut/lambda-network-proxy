@@ -45,7 +45,7 @@ object (s3://), or a local file (file://).`))
 	}
 	lambdaClient := lambda.NewFromConfig(awsCfg)
 	s3Client := s3.NewFromConfig(awsCfg)
-	ssmClient := ssm.NewFromConfig(awsCfg)
+	var ssmClient SSMGetParameterAPIClient = ssm.NewFromConfig(awsCfg)
 
 	ctx = context.WithValue(ctx, ClientAWSLambda, lambdaClient)
 	ctx = context.WithValue(ctx, ClientAWSS3, s3Client)
@@ -71,9 +71,9 @@ object (s3://), or a local file (file://).`))
 		var err error
 
 		if strings.HasPrefix(listenerConfig.Protocol, "tcp") {
-			listener, err = NewTCPListener(config, &listenerConfig)
+			listener, err = NewTCPListener(config, listenerConfig)
 		} else {
-			err = fmt.Errorf("Unsupported protocol: %s", listenerConfig.Protocol)
+			listener, err = NewUDPListener(config, listenerConfig)
 		}
 
 		if err != nil {
@@ -89,10 +89,8 @@ object (s3://), or a local file (file://).`))
 		go listener.Run(ctx, wg)
 	}
 
-	select {
-	case sigNumber := <-haltChannel:
-		log.Printf("Received signal %s; shutting down", sigNumber)
-	}
+	sigNumber := <-haltChannel
+	log.Printf("Received signal %s; shutting down", sigNumber)
 
 	for _, listener := range listeners {
 		listener.Stop()

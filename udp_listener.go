@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -103,8 +105,15 @@ func (ul *UDPListener) Run(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (ul *UDPListener) StartUDPRelay(ctx context.Context, wg *sync.WaitGroup, startPacket *UDPPacket, remoteAddr *net.UDPAddr) error {
+	ipFamily := FamilyFromProtocol(ul.ListenerConfig.LambdaProtocol)
+	addrs, err := GetLocalAddresses(ipFamily)
+	if err != nil {
+		log.Printf("Unable to get available local addresses: %v", err)
+		return err
+	}
+
 	nonceBytes := make([]byte, 16)
-	_, err := rand.Read(nonceBytes)
+	_, err = rand.Read(nonceBytes)
 	if err != nil {
 		log.Printf("Unable to create nonce: %s", err)
 		return err
@@ -118,13 +127,18 @@ func (ul *UDPListener) StartUDPRelay(ctx context.Context, wg *sync.WaitGroup, st
 		return err
 	}
 
-	proxyConnection, err := net.ListenUDP(ul.ListenerConfig.LambdaProtocol, nil)
+	proxyAddr := &net.UDPAddr{
+		IP:   addrs[0],
+		Port: 0,
+	}
+
+	proxyConnection, err := net.ListenUDP(ul.ListenerConfig.LambdaProtocol, proxyAddr)
 	if err != nil {
 		return err
 	}
 
-	proxyAddr := proxyConnection.LocalAddr()
-	proxyHost, proxyPort, err := AddrToHostAndPort(proxyAddr.String())
+	// Get the port assigned to us.
+	proxyHost, proxyPort, err := AddrToHostAndPort(proxyConnection.LocalAddr().String())
 	if err != nil {
 		log.Printf("Unable to get Lambda proxy host/port: %v", err)
 		proxyConnection.Close()
@@ -173,20 +187,37 @@ func (ul *UDPListener) StartUDPRelay(ctx context.Context, wg *sync.WaitGroup, st
 
 func (relay *UDPRelay) InvokeAndWaitForLambda(ctx context.Context, wg *sync.WaitGroup, payloadBytes []byte) {
 	defer wg.Done()
+	payloadString := string(payloadBytes)
 	lambdaClient := ctx.Value(ClientAWSLambda).(LambdaInvokeAPIClient)
 	ii := lambda.InvokeInput{
 		FunctionName:   &relay.Listener.ListenerConfig.FunctionName,
 		InvocationType: lambdaTypes.InvocationTypeRequestResponse,
 		Payload:        payloadBytes,
 	}
-	_, err := lambdaClient.Invoke(ctx, &ii)
+
+	log.Printf("Invoking Lambda function %s with payload %s", relay.Listener.ListenerConfig.FunctionName, payloadString)
+	result, err := lambdaClient.Invoke(ctx, &ii)
+	if result.FunctionError != nil && *result.FunctionError != "" {
+		log.Printf("Lambda invocation for payload %s failed: %s", payloadString, *result.FunctionError)
+	} else {
+		log.Printf("Lambda invocation for payload %s succeeded: %s", payloadString, string(result.Payload))
+	}
+
+	if result.LogResult != nil && *result.LogResult != "" {
+		d := base64.NewDecoder(base64.StdEncoding, strings.NewReader(*result.LogResult))
+		result, err := io.ReadAll(d)
+		if err == nil {
+			log.Printf("%s", string(result))
+		}
+	}
 
 	// Lambda done. Stop relaying packets from the remote to Lambda.
 	relay.Listener.RelaysMutex.Lock()
 	delete(relay.Listener.Relays, relay.RemoteAddress.String())
 	relay.Listener.RelaysMutex.Unlock()
 
-	relay.ProxyConnection.Close()
+	// FIXME: remove when debugging complete.
+	// relay.ProxyConnection.Close()
 
 	if err != nil {
 		log.Printf("Lambda invocation on %s failed: %v", relay.Listener.ListenerConfig.FunctionName, err)
@@ -205,6 +236,7 @@ func (relay *UDPRelay) LambdaToRemoteLoop(ctx context.Context, wg *sync.WaitGrou
 		var n int
 		var err error
 
+		log.Printf("Waiting for initial nonce from Lambda (expecting %s)", relay.Nonce)
 		n, _, _, lambdaAddress, err = relay.ProxyConnection.ReadMsgUDP(messageBuffer, oobBuffer)
 		if err != nil {
 			log.Printf("Failed to receive packet from Lambda: %s", err)
@@ -214,10 +246,11 @@ func (relay *UDPRelay) LambdaToRemoteLoop(ctx context.Context, wg *sync.WaitGrou
 
 		message := strings.TrimSpace(string(messageBuffer[:n]))
 		if message == relay.Nonce {
+			log.Printf("Nonce received")
 			break
 		}
 
-		log.Printf("Invalid nonce recieved from %s: %s", lambdaAddress.String(), message)
+		log.Printf("Invalid nonce recieved from %s: received %s, expected %s", lambdaAddress.String(), message, relay.Nonce)
 	}
 
 	// Send all outstanding packets to Lambda.

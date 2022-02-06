@@ -45,7 +45,7 @@ func init() {
 // Config is the top-level JSON/YAML configuration for the proxy server.
 type Config struct {
 	// Listeners is an array of Listener directives. At least one must be present.
-	Listeners []ListenerConfig `json:"Listeners"`
+	Listeners []*ListenerConfig `json:"Listeners"`
 
 	// FunctionName is the default function to use for requests that do not specify a function.
 	FunctionName string `json:"FunctionName,omitempty"`
@@ -99,21 +99,11 @@ func (c *Config) validate() error {
 
 func (l *ListenerConfig) validate(index int, defaultFunctionName string, protocolMap map[string]map[uint]int) []error {
 	errors := []error{}
-	_, found := validProtocols[l.Protocol]
-	if !found {
-		protocolKeys := make([]string, 0, len(validProtocols))
-		for k := range validProtocols {
-			protocolKeys = append(protocolKeys, fmt.Sprintf(`"%s"`, k))
-		}
-
-		errors = append(errors, fmt.Errorf(
-			"Invalid Listeners[%d].Protocol value: %#v: expected one of: %s.", index, l.Protocol, validProtocolsString))
-	}
 
 	if l.LambdaProtocol == "" {
 		l.LambdaProtocol = l.Protocol
 	} else {
-		_, found = protocolMap[l.Protocol]
+		_, found := protocolMap[l.Protocol]
 		if !found {
 			errors = append(errors, fmt.Errorf(
 				"Invalid Listeners[%d].LambdaProtocol value: %#v: expected one of: %s.", index, l.LambdaProtocol,

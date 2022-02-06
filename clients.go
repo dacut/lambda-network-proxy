@@ -18,13 +18,13 @@ const (
 )
 
 type LambdaInvokeAPIClient interface {
-	Invoke(ctx context.Context, input *lambda.InvokeInput, optFns ...func(*lambda.Options)) (*lambda.InvokeOutput, error)
+	Invoke(ctx context.Context, params *lambda.InvokeInput, optFns ...func(*lambda.Options)) (*lambda.InvokeOutput, error)
 }
 
 type S3GetObjectAPIClient interface {
-	GetObject(context.Context, *s3.GetObjectInput, ...func(s3.Options)) (*s3.GetObjectOutput, error)
+	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
 type SSMGetParameterAPIClient interface {
-	GetParameter(context.Context, *ssm.GetParameterInput, ...func(ssm.Options)) (*ssm.GetParameterOutput, error)
+	GetParameter(ctx context.Context, params *ssm.GetParameterInput, optFns ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 }

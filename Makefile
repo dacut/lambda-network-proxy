@@ -19,7 +19,7 @@ proxy-ecs: *.go go.mod go.sum
 container: proxy-ecs ## 🏗 - Builds the Docker image
 .PHONY: container
 container: proxy-ecs
-	docker buildx build --load --platform linux/arm64 -f Dockerfile -t lambda-nlb-proxy .
+	docker buildx build --push --platform linux/arm64 -f Dockerfile -t dacut/proxy-ecs .
 
 test: ## 🚦 - Runs tests and saves coverage report
 	rm -f coverage.out
