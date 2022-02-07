@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -106,4 +107,18 @@ func IPMatchesFamily(ip net.IP, ipFamily IPFamily) bool {
 	}
 
 	return to4 == nil
+}
+
+func WriteBytes(w io.Writer, b []byte) (int, error) {
+	totalWritten := 0
+	for totalWritten < len(b) {
+		n, err := w.Write(b[totalWritten:])
+		if err != nil {
+			return totalWritten, err
+		}
+
+		totalWritten += n
+	}
+
+	return totalWritten, nil
 }

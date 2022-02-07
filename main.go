@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -105,18 +104,4 @@ func ShowUsage(w io.Writer) {
 	flag.CommandLine.SetOutput(w)
 	flag.PrintDefaults()
 	os.Exit(1)
-}
-
-func Relay(ctx context.Context, wg *sync.WaitGroup, dst, src *net.TCPConn) {
-	defer wg.Done()
-	defer dst.CloseWrite()
-	defer src.CloseRead()
-
-	nWritten, err := io.Copy(dst, src)
-
-	if err != nil {
-		log.Printf("Failed to relay data (%d bytes copied): %v", nWritten, err)
-	} else {
-		log.Printf("Relayed %d bytes from %v to %v", nWritten, src.RemoteAddr(), dst.RemoteAddr())
-	}
 }

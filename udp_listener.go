@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -31,11 +32,13 @@ type UDPListener struct {
 type UDPRelay struct {
 	Listener           *UDPListener
 	StartupPackets     []*UDPPacket
-	ProxyConnection    *net.UDPConn
 	RemoteAddress      *net.UDPAddr
+	ProxyAddress       *net.UDPAddr
+	LambdaConnection   *net.UDPConn
 	LambdaAddress      *net.UDPAddr
 	Nonce              string
 	StartupPacketMutex sync.Mutex
+	Stopped            uint32
 }
 
 type UDPPacket struct {
@@ -132,16 +135,16 @@ func (ul *UDPListener) StartUDPRelay(ctx context.Context, wg *sync.WaitGroup, st
 		Port: 0,
 	}
 
-	proxyConnection, err := net.ListenUDP(ul.ListenerConfig.LambdaProtocol, proxyAddr)
+	lambdaConnection, err := net.ListenUDP(ul.ListenerConfig.LambdaProtocol, proxyAddr)
 	if err != nil {
 		return err
 	}
 
 	// Get the port assigned to us.
-	proxyHost, proxyPort, err := AddrToHostAndPort(proxyConnection.LocalAddr().String())
+	proxyHost, proxyPort, err := AddrToHostAndPort(lambdaConnection.LocalAddr().String())
 	if err != nil {
 		log.Printf("Unable to get Lambda proxy host/port: %v", err)
-		proxyConnection.Close()
+		lambdaConnection.Close()
 		return err
 	}
 
@@ -158,17 +161,20 @@ func (ul *UDPListener) StartUDPRelay(ctx context.Context, wg *sync.WaitGroup, st
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Unable to marshal payload: %v", err)
-		proxyConnection.Close()
+		lambdaConnection.Close()
 		return err
 	}
 
 	relay := &UDPRelay{
 		Listener:           ul,
 		StartupPackets:     []*UDPPacket{startPacket},
-		ProxyConnection:    proxyConnection,
 		RemoteAddress:      remoteAddr,
+		ProxyAddress:       proxyAddr,
+		LambdaConnection:   lambdaConnection,
+		LambdaAddress:      nil,
 		Nonce:              nonce,
 		StartupPacketMutex: sync.Mutex{},
+		Stopped:            0,
 	}
 
 	// This function is called with the RelaysMutex held, so this is ok.
@@ -197,13 +203,20 @@ func (relay *UDPRelay) InvokeAndWaitForLambda(ctx context.Context, wg *sync.Wait
 
 	log.Printf("Invoking Lambda function %s with payload %s", relay.Listener.ListenerConfig.FunctionName, payloadString)
 	result, err := lambdaClient.Invoke(ctx, &ii)
-	if result.FunctionError != nil && *result.FunctionError != "" {
-		log.Printf("Lambda invocation for payload %s failed: %s", payloadString, *result.FunctionError)
+
+	if err != nil {
+		log.Printf("Lambda invocation for payload %s failed: %v", payloadString, err)
 	} else {
-		log.Printf("Lambda invocation for payload %s succeeded: %s", payloadString, string(result.Payload))
+		if result == nil {
+			log.Printf("Lambda invocation for payload %s succeeded without a result", payloadString)
+		} else if result.FunctionError != nil && *result.FunctionError != "" {
+			log.Printf("Lambda invocation for payload %s failed: %s", payloadString, *result.FunctionError)
+		} else {
+			log.Printf("Lambda invocation for payload %s succeeded: %s", payloadString, string(result.Payload))
+		}
 	}
 
-	if result.LogResult != nil && *result.LogResult != "" {
+	if result != nil && result.LogResult != nil && *result.LogResult != "" {
 		d := base64.NewDecoder(base64.StdEncoding, strings.NewReader(*result.LogResult))
 		result, err := io.ReadAll(d)
 		if err == nil {
@@ -216,8 +229,8 @@ func (relay *UDPRelay) InvokeAndWaitForLambda(ctx context.Context, wg *sync.Wait
 	delete(relay.Listener.Relays, relay.RemoteAddress.String())
 	relay.Listener.RelaysMutex.Unlock()
 
-	// FIXME: remove when debugging complete.
-	// relay.ProxyConnection.Close()
+	atomic.StoreUint32(&relay.Stopped, 1)
+	relay.LambdaConnection.Close()
 
 	if err != nil {
 		log.Printf("Lambda invocation on %s failed: %v", relay.Listener.ListenerConfig.FunctionName, err)
@@ -226,41 +239,57 @@ func (relay *UDPRelay) InvokeAndWaitForLambda(ctx context.Context, wg *sync.Wait
 
 func (relay *UDPRelay) LambdaToRemoteLoop(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
+	proxyAddress := relay.ProxyAddress.String()
+	remoteAddress := relay.RemoteAddress.String()
 
 	messageBuffer := make([]byte, 65536)
 	oobBuffer := make([]byte, 65536)
 	var lambdaAddress *net.UDPAddr
 
-	// Wait for the Nonce packet to be received.
+	// Wait for the nonce packet to be received.
 	for {
 		var n int
 		var err error
 
-		log.Printf("Waiting for initial nonce from Lambda (expecting %s)", relay.Nonce)
-		n, _, _, lambdaAddress, err = relay.ProxyConnection.ReadMsgUDP(messageBuffer, oobBuffer)
+		log.Printf(
+			"Waiting for initial nonce from Lambda for remote connection %s on proxy connection %s", remoteAddress,
+			proxyAddress)
+
+		n, _, _, lambdaAddress, err = relay.LambdaConnection.ReadMsgUDP(messageBuffer, oobBuffer)
 		if err != nil {
-			log.Printf("Failed to receive packet from Lambda: %s", err)
-			relay.ProxyConnection.Close()
+			stopped := atomic.LoadUint32(&relay.Stopped)
+			if stopped == 0 && !errors.Is(err, io.EOF) {
+				log.Printf("Failed to receive packet from Lambda for remote connection %s on proxy connection %s: %s",
+					remoteAddress, proxyAddress, err)
+			} else {
+				log.Printf(
+					"Connection closed before nonce received from Lambda for remote connection %s on proxy connection %s",
+					remoteAddress, proxyAddress)
+			}
+
+			relay.LambdaConnection.Close()
 			return
 		}
 
-		message := strings.TrimSpace(string(messageBuffer[:n]))
+		message := string(messageBuffer[:n])
 		if message == relay.Nonce {
 			log.Printf("Nonce received")
 			break
 		}
 
-		log.Printf("Invalid nonce recieved from %s: received %s, expected %s", lambdaAddress.String(), message, relay.Nonce)
+		log.Printf(
+			"Invalid nonce recieved from %s for remote connection %s on proxy connection %s", lambdaAddress.String(),
+			remoteAddress, proxyAddress)
 	}
 
 	// Send all outstanding packets to Lambda.
 	relay.StartupPacketMutex.Lock()
-	relay.LambdaAddress = lambdaAddress
+	relay.LambdaAddress = CopyUDPAddr(lambdaAddress)
 	for _, packet := range relay.StartupPackets {
-		_, _, err := relay.ProxyConnection.WriteMsgUDP(packet.Message, packet.OOB, relay.LambdaAddress)
+		_, _, err := relay.LambdaConnection.WriteMsgUDP(packet.Message, packet.OOB, relay.LambdaAddress)
 		if err != nil {
 			log.Printf("Failed to send packet to Lambda: %s", err)
-			relay.ProxyConnection.Close()
+			relay.LambdaConnection.Close()
 			relay.StartupPacketMutex.Unlock()
 			return
 		}
@@ -273,10 +302,15 @@ func (relay *UDPRelay) LambdaToRemoteLoop(ctx context.Context, wg *sync.WaitGrou
 		var n, oobn int
 		var err error
 
-		n, oobn, _, lambdaAddress, err = relay.ProxyConnection.ReadMsgUDP(messageBuffer, oobBuffer)
+		n, oobn, _, lambdaAddress, err = relay.LambdaConnection.ReadMsgUDP(messageBuffer, oobBuffer)
 		if err != nil {
-			log.Printf("Failed to receive packet from Lambda: %s", err)
-			relay.ProxyConnection.Close()
+			stopped := atomic.LoadUint32(&relay.Stopped)
+			if stopped == 0 && !errors.Is(err, io.EOF) {
+				log.Printf("Failed to receive packet from Lambda: %s", err)
+			} else {
+				log.Printf("Lambda connection closed")
+			}
+			relay.LambdaConnection.Close()
 			return
 		}
 
@@ -303,10 +337,10 @@ func (relay *UDPRelay) ReceivePacketFromRemote(packet *UDPPacket) {
 		relay.StartupPacketMutex.Unlock()
 	} else {
 		relay.StartupPacketMutex.Unlock()
-		_, _, err := relay.ProxyConnection.WriteMsgUDP(packet.Message, packet.OOB, relay.LambdaAddress)
+		_, _, err := relay.LambdaConnection.WriteMsgUDP(packet.Message, packet.OOB, relay.LambdaAddress)
 		if err != nil {
 			log.Printf("Failed to send packet to Lambda: %s", err)
-			relay.ProxyConnection.Close()
+			relay.LambdaConnection.Close()
 			return
 		}
 	}
