@@ -16,9 +16,14 @@ build-ecs: proxy-ecs ## 🏗 - Builds the Linux x86-64 executable for ECS
 proxy-ecs: *.go go.mod go.sum
 	GOARCH=arm64 GOOS=linux go build -o proxy-ecs
 
-container: proxy-ecs ## 🏗 - Builds the Docker image
+container: proxy-ecs ## 🏗 - Builds the Docker image locally
 .PHONY: container
 container: proxy-ecs
+	docker buildx build --load --platform linux/arm64 -f Dockerfile -t dacut/proxy-ecs .
+
+push-container: proxy-ecs ## 🏗 - Builds the Docker image and pushes it to Docker Hub
+.PHONY: push-container
+push-container: proxy-ecs
 	docker buildx build --push --platform linux/arm64 -f Dockerfile -t dacut/proxy-ecs .
 
 test: ## 🚦 - Runs tests and saves coverage report
